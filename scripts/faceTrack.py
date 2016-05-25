@@ -1,0 +1,93 @@
+#!/usr/bin/env python
+#import roslib;roslib.load_manifest(PKG)
+import cv_bridge
+import cv2.cv as cv
+import cv2
+import sys
+import os
+import rospy
+import baxter_interface
+from std_msgs.msg import String, Header
+from sensor_msgs.msg import Image
+import argparse
+import numpy as np
+
+import math
+from moveit_commander import conversions
+from geometry_msgs.msg import (
+    PoseStamped,
+    Pose,
+    Point,
+    Quaternion,
+)
+from baxter_core_msgs.srv import (
+    SolvePositionIK,
+    SolvePositionIKRequest,
+)
+
+from sensor_msgs.msg import (
+    Image,
+)
+from std_msgs.msg import (
+    UInt16,
+)
+from grasp.msg import vec
+from rospy.numpy_msg import numpy_msg
+
+#x=0
+#y=0
+
+def callback(data):
+	x = data.data[0]
+	y = data.data[1]
+	print x,y
+	limb = baxter_interface.Limb('left')
+	pose = limb.endpoint_pose()
+	pose = limb.endpoint_pose()
+	xw,yw,zw = pose['position']
+	a,b,c,d =  pose['orientation']
+	print xw,yw,zw
+	xw = xw + 0.01*x
+	yw = yw + 0.01*y
+	rpy_pose = (xw, yw, zw, 0, math.pi,0)
+	quaternion_pose = conversions.list_to_pose_stamped(rpy_pose, "base")
+
+        node = "ExternalTools/" + 'left'+ "/PositionKinematicsNode/IKService"
+        ik_service = rospy.ServiceProxy(node, SolvePositionIK)
+        ik_request = SolvePositionIKRequest()
+        hdr = Header(stamp=rospy.Time.now(), frame_id="base")
+
+        ik_request.pose_stamp.append(quaternion_pose)
+        try:
+            rospy.wait_for_service(node, 5.0)
+            ik_response = ik_service(ik_request)
+        except (rospy.ServiceException, rospy.ROSException), error_message:
+            rospy.logerr("Service request failed: %r" % (error_message,))
+            sys.exit("ERROR - baxter_ik_move - Failed to append pose")
+
+        if ik_response.isValid[0]:
+            print("PASS: Valid joint configuration found")
+            # convert response to joint position control dictionary
+            limb_joints = dict(zip(ik_response.joints[0].name, ik_response.joints[0].position))
+            # move limb
+            limb.move_to_joint_positions(limb_joints)
+
+        else:
+            # display invalid move message on head display
+            #self.splash_screen("Invalid", "move")
+            # little point in continuing so exit with error message
+	    print 'failed'
+            print "requested move =", rpy_pose
+            sys.exit("ERROR - baxter_ik_move - No valid joint configuration found")
+
+
+def main(args):
+	#global x,y
+	rospy.init_node('faceTrack', anonymous=True)
+	rospy.Subscriber("vec", numpy_msg(vec), callback)
+	#print x,y
+	rospy.spin()
+
+
+if __name__ == '__main__':
+	main(sys.argv)

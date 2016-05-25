@@ -1,0 +1,114 @@
+#!/usr/bin/env python
+import cv_bridge
+import cv2.cv as cv
+import cv2
+import sys
+import os
+import rospy
+import baxter_interface
+from std_msgs.msg import String, Header
+from sensor_msgs.msg import Image
+import argparse
+import numpy as np
+os.environ['GLOG_minloglevel'] = '2'
+import caffe
+import math
+from rospy.numpy_msg import numpy_msg
+from grasp.msg import vec
+
+count = 0;
+#Background Subtractor
+kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(2,2))
+MOG = cv2.BackgroundSubtractorMOG2(500,50,False)
+#ConvNet
+modelFile  = '/home/birl/ros_ws/src/grasp/caffe/graspDeploy.prototxt'
+weightFile = '/home/birl/ros_ws/src/grasp/caffe/caffeGraspTrainX_iter_10000.caffemodel'
+graspNet = caffe.Net(modelFile, weightFile, caffe.TEST)
+caffe.set_mode_cpu()
+
+def feat2rect(x,y,w,h,th):
+	al = np.arctan2(h,w)
+	diag = np.sqrt(w**2+h**2)
+	angle = th + al
+	cent = np.array((x,y))
+	vec = np.array((diag*np.cos(angle)/2, diag*np.sin(angle)/2))
+	vec2 = np.array((w*np.cos(th), w*np.sin(th)))
+	pt1x,pt1y = cent - vec
+	pt3x,pt3y = cent + vec # opposite points
+	pt2x,pt2y = np.array((pt1x,pt1y)) + vec2
+	pt4x,pt4y = np.array((pt3x,pt3y)) - vec2
+	return np.array((int(pt1x),int(pt1y),int(pt2x),int(pt2y),int(pt3x),int(pt3y),int(pt4x),int(pt4y)))
+
+def rect2img(img,points,u,v,name):
+	cv2.circle(img,(u,v),3,(255,0,0),-1)
+	cv2.line(img,(points[0],points[1]),(points[2],points[3]),(255,0,0),1)
+	cv2.line(img,(points[2],points[3]),(points[4],points[5]),(0,255,0),1)
+	cv2.line(img,(points[4],points[5]),(points[6],points[7]),(255,0,0),1)
+	cv2.line(img,(points[6],points[7]),(points[0],points[1]),(0,255,0),1)
+	cv2.imshow(name, img)
+	cv2.waitKey(2)
+
+def stream(cameraTopic):
+	rate = rospy.Rate(100)
+	imageSub = rospy.Subscriber(cameraTopic, Image, callback)
+	print("Displaying. Press Ctrl-C to stop...")
+	while not rospy.is_shutdown():
+		rate.sleep()
+		
+def callback(data):
+	streamDisp(data)
+
+def streamDisp(data):
+	global MOG, kernel,graspNet	
+	bridge = cv_bridge.CvBridge()
+	try:
+		cv_image = bridge.imgmsg_to_cv2(data,desired_encoding='bgr8')
+	except cv_bridge.CvBridgeError, e:
+		print e
+	# display image
+	mask = MOG.apply(cv_image)
+	mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+	imageM = cv2.bitwise_and(cv_image,cv_image,mask = mask)
+	# image is 640x480	
+	imageMCrop = imageM[400-224:400, 320-112:320+112]
+	#print imageMCrop.shape
+	#cv2.imshow("Grasp View", imageMCrop)
+	#cv2.waitKey(2)
+	inImg = (imageMCrop.transpose((2,0,1))-144.0)/255
+	graspNet.blobs['data'].data[...] = inImg
+	#print 'Net is going'
+	pred=graspNet.forward()
+	#print 'Net is gone'
+	#print pred.values()
+	x,y,w,h,c2,s2 = np.array(pred.values(), dtype='float').reshape(-1)
+	x=int(x*224)
+	y=int(y*224)
+	w=(w*224)
+	h=(h*224)
+	print w,h
+	u=int(x+(320-112))
+	v=int(y+(400-224))
+	#print x,y,w,h,c2,s2
+	th = (np.arctan2(s2,c2))/2
+        th1= np.arccos(c2)/2
+	th2=np.arcsin(s2)/2
+	print 'angle'
+	print th,th1,th2
+	points=feat2rect(u,v,w,h,th)
+	rect2img(imageMCrop,feat2rect(x,y,w,h,th),x,y,'raw')
+	rect2img(cv_image,feat2rect(u,v,w,h,th),u,v,'full')
+	vecPub = rospy.Publisher('vec', numpy_msg(vec), queue_size=10)
+	print np.float32(u),np.float32(v),th
+	vecPub.publish(np.array((np.float32(u),np.float32(v),np.float32(th))))
+
+def main(args):
+	rospy.init_node('graspNet', anonymous=True)
+	MOG = cv2.BackgroundSubtractorMOG2()
+	cameraTopic = '/cameras/left_hand_camera/image'
+	stream(cameraTopic)
+	print 'complete!'
+	cv2.destroyAllWindows()
+	return 0
+
+if __name__ == '__main__':
+	main(sys.argv)

@@ -1,0 +1,157 @@
+#!/usr/bin/env python
+import cv_bridge
+import cv2.cv as cv
+import cv2
+import sys
+import os
+import rospy
+import baxter_interface
+from std_msgs.msg import String, Header
+from sensor_msgs.msg import Image
+import argparse
+import numpy as np
+import math
+from rospy.numpy_msg import numpy_msg
+from grasp.msg import vec
+
+def nothing(x):
+    pass
+
+def feat2rect(x,y,w,h,th):
+	al = np.arctan2(h,w)
+	diag = np.sqrt(w**2+h**2)
+	angle = th + al
+	cent = np.array((x,y))
+	vec = np.array((diag*np.cos(angle)/2, diag*np.sin(angle)/2))
+	vec2 = np.array((w*np.cos(th), w*np.sin(th)))
+	pt1x,pt1y = cent - vec
+	pt3x,pt3y = cent + vec # opposite points
+	pt2x,pt2y = np.array((pt1x,pt1y)) + vec2
+	pt4x,pt4y = np.array((pt3x,pt3y)) - vec2
+	return np.array((int(pt1x),int(pt1y),int(pt2x),int(pt2y),int(pt3x),int(pt3y),int(pt4x),int(pt4y)))
+
+def rect2img(img,points,u,v):
+	cv2.circle(img,(u,v),3,(255,0,0),-1)
+	cv2.line(img,(points[0],points[1]),(points[2],points[3]),(255,0,0),1)
+	cv2.line(img,(points[2],points[3]),(points[4],points[5]),(0,255,0),1)
+	cv2.line(img,(points[4],points[5]),(points[6],points[7]),(255,0,0),1)
+	cv2.line(img,(points[6],points[7]),(points[0],points[1]),(0,255,0),1)
+	return img
+
+
+window = 1
+kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(2,2))
+MOG = cv2.BackgroundSubtractorMOG2(100,50,False)
+params = cv2.SimpleBlobDetector_Params()
+params.minThreshold = 1
+params.filterByArea = True
+params.minArea = 1
+detector = cv2.SimpleBlobDetector(params)
+count = 0
+if window :
+	cv2.namedWindow('image')
+	cv2.createTrackbar('hl','image',0,255,nothing)
+	cv2.createTrackbar('hh','image',0,255,nothing)
+	cv2.createTrackbar('sl','image',0,255,nothing)
+	cv2.createTrackbar('sh','image',0,255,nothing)
+	cv2.createTrackbar('vl','image',0,255,nothing)
+	cv2.createTrackbar('vh','image',0,255,nothing)
+
+
+def stream(cameraTopic):
+	rate = rospy.Rate(0.5)
+	imageSub = rospy.Subscriber(cameraTopic, Image, callback)
+	print("Displaying. Press Ctrl-C to stop...")
+	while not rospy.is_shutdown():
+		rate.sleep()
+
+def callback(data):
+	streamDisp(data)
+
+def streamDisp(data):
+	global count, kernel, MOG, detector
+	bridge = cv_bridge.CvBridge()
+	try:
+		cv_image = bridge.imgmsg_to_cv2(data,desired_encoding="passthrough")
+	except cv_bridge.CvBridgeError, e:
+		print e
+	mask = MOG.apply(cv_image)
+	count = count+1
+	if (count<100):
+		print 'training...'
+	else:
+		if window :
+			hl = cv2.getTrackbarPos('hl','image')
+			hh = cv2.getTrackbarPos('hh','image')
+			sl = cv2.getTrackbarPos('sl','image')
+			sh = cv2.getTrackbarPos('sh','image')
+			vl = cv2.getTrackbarPos('vl','image')
+			vh = cv2.getTrackbarPos('vh','image')
+		else : 
+			hl = 59
+			hh = 161
+			sl = 134
+			sh = 225
+			vl = 73
+			vh = 255
+		mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+		imageM = cv2.bitwise_and(cv_image,cv_image,mask = mask)
+		imageM = imageM[480-224:480, 320-112:320+112]
+		imageC = cv_image[480-224:480, 320-112:320+112]
+		hsv = cv2.cvtColor(imageM, cv2.COLOR_BGR2HSV)
+		lower_red = np.array([hl,sl,vl])
+       		upper_red = np.array([hh,sh,vh])
+		mask = cv2.morphologyEx(cv2.inRange(hsv, lower_red, upper_red), cv2.MORPH_OPEN, kernel)
+		imageM = cv2.bitwise_and(imageM,imageM,mask = mask)
+		imageM = cv2.blur(imageM,(5,5))
+		gray = cv2.cvtColor(imageM,cv2.COLOR_BGR2GRAY)
+		ret,thresh = cv2.threshold(gray,10,255,cv2.THRESH_BINARY_INV)
+		#circles = cv2.HoughCircles(gray, cv2.cv.CV_HOUGH_GRADIENT, 1, 50)
+		
+		#if circles is not None:
+		#	print 'circles'
+		#	circles = np.round(circles[0, :]).astype("int")
+		#	for (x, y, r) in circles:
+		#		cv2.circle(imageM, (x, y), r, (0, 255, 0), 4)
+		#		cv2.rectangle(imageM, (x - 5, y - 5), (x + 5, y + 5), (0, 128, 255), -1)
+		#else: 
+		#	#print 'no circles'
+		keypoints = detector.detect(thresh)
+		if len(keypoints)>0:
+			print 'keypoints'
+			imageC = cv2.drawKeypoints(imageC,keypoints,np.array([]),(0,0,255),cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
+		else: 
+			print 'no keypoints'
+		if len(keypoints)>1:
+			print len(keypoints)
+			for i in range(0,len(keypoints)-1):
+				for k in range(1,len(keypoints)-i):
+					Y = keypoints[i+k].pt[1]-keypoints[i].pt[1]
+					X = keypoints[i+k].pt[0]-keypoints[i].pt[0]
+					L = np.sqrt(X**2 + Y**2)
+					if L<50:
+						cv2.line(imageC,(int(keypoints[i].pt[0]),int(keypoints[i].pt[1])),(int(keypoints[i+1].pt[0]),int(keypoints[i+1].pt[1])),(0,255,0))
+						alpha = np.arctan2(Y,X)
+						th = alpha - np.pi/2 
+						L = np.sqrt(X**2 + Y**2)
+						print L
+						w = 20
+						h = 8
+						N = int(np.floor(L/5))
+						for j in range(0,N):
+							x = keypoints[i].pt[0] + np.cos(alpha)*j*L/N
+							y = keypoints[i].pt[1] + np.sin(alpha)*j*L/N
+							imageC = rect2img(imageC,feat2rect(x,y,w,h,th),int(x),int(y))
+		cv2.imshow('image', imageC)
+		cv2.waitKey(2)
+		
+
+def main(args):
+	rospy.init_node('graspGenerate', anonymous=True)
+	cameraTopic = '/camera/rgb/image_color'
+	stream(cameraTopic)
+	cv2.destroyAllWindows()
+	return 0
+
+if __name__ == '__main__':
+	main(sys.argv)
